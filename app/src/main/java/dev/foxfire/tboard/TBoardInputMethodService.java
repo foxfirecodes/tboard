@@ -68,12 +68,16 @@ public class TBoardInputMethodService extends InputMethodService {
     private boolean capsLock;
     private boolean ctrlLatch;
     private boolean altLatch;
+    private boolean ctrlLock;
+    private boolean altLock;
     private boolean symbolMode;
     private boolean composeMode;
     private boolean snippetsMode;
     private boolean voiceActive;
     private boolean voiceListening;
     private long lastShiftTapTime;
+    private long lastCtrlTapTime;
+    private long lastAltTapTime;
     private final StringBuilder composeBuffer = new StringBuilder();
     private int composeCursor;
     private LinearLayout root;
@@ -573,12 +577,10 @@ public class TBoardInputMethodService extends InputMethodService {
                 handleShiftTap();
                 return;
             case CODE_CTRL:
-                ctrlLatch = !ctrlLatch;
-                updateModifierLabels();
+                handleCtrlTap();
                 return;
             case CODE_ALT:
-                altLatch = !altLatch;
-                updateModifierLabels();
+                handleAltTap();
                 return;
             case CODE_VOICE:
                 toggleVoiceInput();
@@ -796,6 +798,40 @@ public class TBoardInputMethodService extends InputMethodService {
         updateModifierLabels();
     }
 
+    private void handleCtrlTap() {
+        long now = System.currentTimeMillis();
+        if (ctrlLock) {
+            ctrlLock = false;
+            ctrlLatch = false;
+            lastCtrlTapTime = 0L;
+        } else if (lastCtrlTapTime != 0L && now - lastCtrlTapTime <= SHIFT_DOUBLE_TAP_MS) {
+            ctrlLock = true;
+            ctrlLatch = false;
+            lastCtrlTapTime = 0L;
+        } else {
+            ctrlLatch = !ctrlLatch;
+            lastCtrlTapTime = now;
+        }
+        updateModifierLabels();
+    }
+
+    private void handleAltTap() {
+        long now = System.currentTimeMillis();
+        if (altLock) {
+            altLock = false;
+            altLatch = false;
+            lastAltTapTime = 0L;
+        } else if (lastAltTapTime != 0L && now - lastAltTapTime <= SHIFT_DOUBLE_TAP_MS) {
+            altLock = true;
+            altLatch = false;
+            lastAltTapTime = 0L;
+        } else {
+            altLatch = !altLatch;
+            lastAltTapTime = now;
+        }
+        updateModifierLabels();
+    }
+
     private String printable(String code) {
         if (code.length() == 1 && Character.isLetter(code.charAt(0))) {
             return (shift || capsLock) ? code.toUpperCase(Locale.US) : code;
@@ -822,8 +858,8 @@ public class TBoardInputMethodService extends InputMethodService {
         if (text.length() == 1) {
             int keyCode = keyCodeForChar(text.charAt(0));
             int meta = 0;
-            if (ctrlLatch) meta |= KeyEvent.META_CTRL_ON;
-            if (altLatch) meta |= KeyEvent.META_ALT_ON;
+            if (ctrlLatch || ctrlLock) meta |= KeyEvent.META_CTRL_ON;
+            if (altLatch || altLock) meta |= KeyEvent.META_ALT_ON;
             if (keyCode != KeyEvent.KEYCODE_UNKNOWN && meta != 0) {
                 sendModifiedKey(ic, keyCode, meta);
                 clearOneShotModifiers();
@@ -837,8 +873,8 @@ public class TBoardInputMethodService extends InputMethodService {
 
     private void sendKey(InputConnection ic, int keyCode) {
         int meta = 0;
-        if (ctrlLatch) meta |= KeyEvent.META_CTRL_ON;
-        if (altLatch) meta |= KeyEvent.META_ALT_ON;
+        if (ctrlLatch || ctrlLock) meta |= KeyEvent.META_CTRL_ON;
+        if (altLatch || altLock) meta |= KeyEvent.META_ALT_ON;
         if (shift || capsLock) meta |= KeyEvent.META_SHIFT_ON;
         sendModifiedKey(ic, keyCode, meta);
         clearOneShotModifiers();
@@ -875,8 +911,8 @@ public class TBoardInputMethodService extends InputMethodService {
                 shiftKey.setText(shift ? "⇧•" : "⇧");
             }
         }
-        if (ctrlKey != null) ctrlKey.setText(ctrlLatch ? "Ctrl•" : "Ctrl");
-        if (altKey != null) altKey.setText(altLatch ? "Alt•" : "Alt");
+        if (ctrlKey != null) ctrlKey.setText(ctrlLock ? "Ctrl⇪" : (ctrlLatch ? "Ctrl•" : "Ctrl"));
+        if (altKey != null) altKey.setText(altLock ? "Alt⇪" : (altLatch ? "Alt•" : "Alt"));
         if (voiceKey != null) {
             if (voiceListening) {
                 voiceKey.setText("Mic•");
