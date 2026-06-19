@@ -1,0 +1,39 @@
+[tools]
+android-sdk = "latest"
+gradle = "latest"
+java = "21"
+yq = "latest"
+
+[tasks.build]
+description = "Build the debug APK with Gradle"
+run = "gradle assembleDebug"
+
+[tasks.build-manual]
+description = "Fallback: build the debug APK directly with Android SDK tools"
+run = "./scripts/build-debug.sh"
+
+[tasks.verify]
+description = "Verify the Gradle-built debug APK signature"
+depends = ["build"]
+run = '"$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose app/build/outputs/apk/debug/app-debug.apk'
+
+[tasks.install]
+description = "Install the Gradle-built debug APK on the connected Android device"
+depends = ["build"]
+run = "adb install -r app/build/outputs/apk/debug/app-debug.apk"
+
+[tasks.devices]
+description = "List connected Android devices"
+run = "adb devices -l"
+
+[tasks.clean]
+description = "Remove generated build outputs"
+run = "rm -rf build app/build .gradle .gradle-user-home"
+
+[tasks.check]
+description = "Run available local checks"
+depends = ["verify"]
+run = "bash -n scripts/build-debug.sh"
+
+[env]
+_.path = { path = "{{env.ANDROID_HOME}}/platform-tools", tools = true }

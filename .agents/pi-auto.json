@@ -1,0 +1,19 @@
+{
+  "sandbox": {
+    "allowWrite": [
+      "."
+    ],
+    "reviewOnlyCommandPrefixes": [
+      [
+        "gh"
+      ],
+      [
+        "git",
+        "commit"
+      ],
+      [
+        "gradle"
+      ]
+    ]
+  }
+}
