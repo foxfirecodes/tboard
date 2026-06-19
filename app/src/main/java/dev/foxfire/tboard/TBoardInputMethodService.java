@@ -53,6 +53,7 @@ public class TBoardInputMethodService extends InputMethodService {
     private static final String CODE_RIGHT = "RIGHT";
     private static final String CODE_VOICE = "VOICE";
     private static final String CODE_COMPOSE = "COMPOSE";
+    private static final String CODE_SNIPPETS = "SNIPPETS";
     private static final String CODE_SYMBOLS = "SYMBOLS";
     private static final String CODE_ALPHA = "ALPHA";
 
@@ -69,6 +70,7 @@ public class TBoardInputMethodService extends InputMethodService {
     private boolean altLatch;
     private boolean symbolMode;
     private boolean composeMode;
+    private boolean snippetsMode;
     private boolean voiceActive;
     private boolean voiceListening;
     private long lastShiftTapTime;
@@ -139,6 +141,9 @@ public class TBoardInputMethodService extends InputMethodService {
         voiceKey = null;
         composeText = null;
 
+        if (snippetsMode) {
+            addSnippetsPanel();
+        }
         if (composeMode) {
             addComposePanel();
         }
@@ -153,16 +158,51 @@ public class TBoardInputMethodService extends InputMethodService {
 
     private void addDevRow() {
         addRow(45,
-                key("Esc", CODE_ESC, 1.1f, Style.DEV),
-                key("Tab", CODE_TAB, 1.1f, Style.DEV),
-                key("Ctrl", CODE_CTRL, 1.05f, Style.DEV),
-                key("Alt", CODE_ALT, 0.95f, Style.DEV),
-                key("Mic", CODE_VOICE, 1.05f, Style.DEV),
-                key(composeMode ? "Draft•" : "Draft", CODE_COMPOSE, 1.25f, Style.DEV),
-                key("↑", CODE_UP, 0.8f, Style.DEV),
-                key("←", CODE_LEFT, 0.8f, Style.DEV),
-                key("↓", CODE_DOWN, 0.8f, Style.DEV),
-                key("→", CODE_RIGHT, 0.8f, Style.DEV));
+                key("Esc", CODE_ESC, 1.0f, Style.DEV),
+                key("Tab", CODE_TAB, 1.0f, Style.DEV),
+                key("Ctrl", CODE_CTRL, 0.95f, Style.DEV),
+                key("Alt", CODE_ALT, 0.85f, Style.DEV),
+                key("Mic", CODE_VOICE, 0.95f, Style.DEV),
+                key(composeMode ? "Draft•" : "Draft", CODE_COMPOSE, 1.15f, Style.DEV),
+                key(snippetsMode ? "Snip•" : "Snip", CODE_SNIPPETS, 1.0f, Style.DEV),
+                key("↑", CODE_UP, 0.7f, Style.DEV),
+                key("←", CODE_LEFT, 0.7f, Style.DEV),
+                key("↓", CODE_DOWN, 0.7f, Style.DEV),
+                key("→", CODE_RIGHT, 0.7f, Style.DEV));
+    }
+
+    private void addSnippetsPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(4), dp(4), dp(4), dp(4));
+        panel.setBackgroundColor(Color.rgb(199, 200, 202));
+
+        addSnippetRow(panel,
+                new Snippet("git st", "git status"),
+                new Snippet("ls -la", "ls -la"),
+                new Snippet("cd", "cd "),
+                new Snippet("clear", "clear"));
+        addSnippetRow(panel,
+                new Snippet("tmux ls", "tmux ls"),
+                new Snippet("attach", "tmux attach -t "),
+                new Snippet("new", "tmux new -s "),
+                new Snippet("exit", "exit"));
+
+        root.addView(panel, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+    }
+
+    private void addSnippetRow(LinearLayout panel, Snippet... snippets) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        for (Snippet snippet : snippets) {
+            row.addView(composeButton(snippet.label, v -> insertSnippet(snippet.text)),
+                    new LinearLayout.LayoutParams(0, dp(38), 1f));
+        }
+        panel.addView(row, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
     }
 
     private void addComposePanel() {
@@ -546,6 +586,9 @@ public class TBoardInputMethodService extends InputMethodService {
             case CODE_COMPOSE:
                 openCompose();
                 return;
+            case CODE_SNIPPETS:
+                toggleSnippets();
+                return;
             case CODE_SYMBOLS:
                 symbolMode = true;
                 buildKeyboard();
@@ -594,6 +637,22 @@ public class TBoardInputMethodService extends InputMethodService {
                 return;
             default:
                 commitText(ic, printable(code));
+        }
+    }
+
+    private void toggleSnippets() {
+        snippetsMode = !snippetsMode;
+        buildKeyboard();
+    }
+
+    private void insertSnippet(String text) {
+        if (composeMode) {
+            insertComposeText(text);
+            return;
+        }
+        InputConnection ic = getCurrentInputConnection();
+        if (ic != null) {
+            ic.commitText(text, 1);
         }
     }
 
@@ -1065,6 +1124,16 @@ public class TBoardInputMethodService extends InputMethodService {
         SPACE,
         NAV,
         INVISIBLE
+    }
+
+    private static class Snippet {
+        final String label;
+        final String text;
+
+        Snippet(String label, String text) {
+            this.label = label;
+            this.text = text;
+        }
     }
 
     private static class KeySpec {
