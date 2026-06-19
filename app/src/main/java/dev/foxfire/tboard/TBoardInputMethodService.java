@@ -6,12 +6,18 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.inputmethodservice.InputMethodService;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Layout;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
 import android.text.TextUtils;
+import android.text.style.ReplacementSpan;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -46,6 +52,7 @@ public class TBoardInputMethodService extends InputMethodService {
     private static final String CODE_LEFT = "LEFT";
     private static final String CODE_RIGHT = "RIGHT";
     private static final String CODE_VOICE = "VOICE";
+    private static final String CODE_COMPOSE = "COMPOSE";
     private static final String CODE_SYMBOLS = "SYMBOLS";
     private static final String CODE_ALPHA = "ALPHA";
 
@@ -61,10 +68,14 @@ public class TBoardInputMethodService extends InputMethodService {
     private boolean ctrlLatch;
     private boolean altLatch;
     private boolean symbolMode;
+    private boolean composeMode;
     private boolean voiceActive;
     private boolean voiceListening;
     private long lastShiftTapTime;
+    private final StringBuilder composeBuffer = new StringBuilder();
+    private int composeCursor;
     private LinearLayout root;
+    private TextView composeText;
     private TextView shiftKey;
     private TextView ctrlKey;
     private TextView altKey;
@@ -126,7 +137,11 @@ public class TBoardInputMethodService extends InputMethodService {
         ctrlKey = null;
         altKey = null;
         voiceKey = null;
+        composeText = null;
 
+        if (composeMode) {
+            addComposePanel();
+        }
         addDevRow();
         if (symbolMode) {
             addSymbolRows();
@@ -140,13 +155,67 @@ public class TBoardInputMethodService extends InputMethodService {
         addRow(45,
                 key("Esc", CODE_ESC, 1.1f, Style.DEV),
                 key("Tab", CODE_TAB, 1.1f, Style.DEV),
-                key("Ctrl", CODE_CTRL, 1.15f, Style.DEV),
-                key("Alt", CODE_ALT, 1.05f, Style.DEV),
-                key("Mic", CODE_VOICE, 1.15f, Style.DEV),
-                key("↑", CODE_UP, 0.9f, Style.DEV),
-                key("←", CODE_LEFT, 0.9f, Style.DEV),
-                key("↓", CODE_DOWN, 0.9f, Style.DEV),
-                key("→", CODE_RIGHT, 0.9f, Style.DEV));
+                key("Ctrl", CODE_CTRL, 1.05f, Style.DEV),
+                key("Alt", CODE_ALT, 0.95f, Style.DEV),
+                key("Mic", CODE_VOICE, 1.05f, Style.DEV),
+                key(composeMode ? "Draft•" : "Draft", CODE_COMPOSE, 1.25f, Style.DEV),
+                key("↑", CODE_UP, 0.8f, Style.DEV),
+                key("←", CODE_LEFT, 0.8f, Style.DEV),
+                key("↓", CODE_DOWN, 0.8f, Style.DEV),
+                key("→", CODE_RIGHT, 0.8f, Style.DEV));
+    }
+
+    private void addComposePanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(4), dp(4), dp(4), dp(4));
+        panel.setBackgroundColor(Color.rgb(199, 200, 202));
+
+        composeText = new TextView(this);
+        composeText.setTextSize(17f);
+        composeText.setTextColor(Color.BLACK);
+        composeText.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        composeText.setMinLines(2);
+        composeText.setMaxLines(4);
+        composeText.setPadding(dp(10), dp(8), dp(10), dp(8));
+        composeText.setBackgroundResource(R.drawable.key_background);
+        composeText.setOnTouchListener((v, event) -> {
+            if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+                moveComposeCursorToTouch(event);
+            }
+            return true;
+        });
+        panel.addView(composeText, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(86)));
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setPadding(0, dp(4), 0, 0);
+        actions.addView(composeButton("Cancel", v -> closeCompose(false)), new LinearLayout.LayoutParams(0, dp(42), 1f));
+        actions.addView(composeButton("Clear", v -> clearComposeDraft()), new LinearLayout.LayoutParams(0, dp(42), 1f));
+        actions.addView(composeButton("Insert", v -> submitComposeDraft()), new LinearLayout.LayoutParams(0, dp(42), 1.25f));
+        panel.addView(actions, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        root.addView(panel, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        updateComposeText();
+    }
+
+    private TextView composeButton(String label, View.OnClickListener listener) {
+        TextView button = new TextView(this);
+        button.setText(label);
+        button.setTextSize(14f);
+        button.setGravity(Gravity.CENTER);
+        button.setTextColor(Color.rgb(35, 36, 38));
+        button.setBackgroundResource(R.drawable.dev_key_background);
+        button.setClickable(true);
+        button.setOnClickListener(listener);
+        button.setPadding(dp(2), 0, dp(2), 0);
+        return button;
     }
 
     private void addAlphaRows() {
@@ -340,6 +409,10 @@ public class TBoardInputMethodService extends InputMethodService {
     }
 
     private void sendBackspaceOnce() {
+        if (composeMode) {
+            deleteComposeBeforeCursor();
+            return;
+        }
         InputConnection ic = getCurrentInputConnection();
         if (ic != null) {
             sendKey(ic, KeyEvent.KEYCODE_DEL);
@@ -351,6 +424,11 @@ public class TBoardInputMethodService extends InputMethodService {
         deleteRepeatRunnable = new Runnable() {
             @Override
             public void run() {
+                if (composeMode) {
+                    deleteComposeBeforeCursor();
+                    handler.postDelayed(this, DELETE_REPEAT_MS);
+                    return;
+                }
                 InputConnection ic = getCurrentInputConnection();
                 if (ic != null) {
                     sendModifiedKey(ic, KeyEvent.KEYCODE_DEL, 0);
@@ -465,6 +543,9 @@ public class TBoardInputMethodService extends InputMethodService {
             case CODE_VOICE:
                 toggleVoiceInput();
                 return;
+            case CODE_COMPOSE:
+                openCompose();
+                return;
             case CODE_SYMBOLS:
                 symbolMode = true;
                 buildKeyboard();
@@ -475,6 +556,10 @@ public class TBoardInputMethodService extends InputMethodService {
                 return;
             default:
                 break;
+        }
+
+        if (composeMode && handleComposeKey(code)) {
+            return;
         }
 
         if (ic == null) return;
@@ -512,6 +597,129 @@ public class TBoardInputMethodService extends InputMethodService {
         }
     }
 
+    private void openCompose() {
+        if (composeMode) {
+            closeCompose(true);
+            return;
+        }
+        composeMode = true;
+        buildKeyboard();
+    }
+
+    private void closeCompose(boolean keepDraft) {
+        composeMode = false;
+        if (!keepDraft) {
+            composeBuffer.setLength(0);
+            composeCursor = 0;
+        }
+        buildKeyboard();
+    }
+
+    private void submitComposeDraft() {
+        if (composeBuffer.length() > 0) {
+            InputConnection ic = getCurrentInputConnection();
+            if (ic != null) {
+                ic.commitText(composeBuffer.toString(), 1);
+            }
+        }
+        closeCompose(false);
+    }
+
+    private void clearComposeDraft() {
+        composeBuffer.setLength(0);
+        composeCursor = 0;
+        updateComposeText();
+    }
+
+    private boolean handleComposeKey(String code) {
+        switch (code) {
+            case CODE_BACKSPACE:
+                deleteComposeBeforeCursor();
+                return true;
+            case CODE_ENTER:
+                insertComposeText("\n");
+                return true;
+            case CODE_TAB:
+                insertComposeText("\t");
+                return true;
+            case CODE_SPACE:
+                insertComposeText(" ");
+                return true;
+            case CODE_LEFT:
+                if (composeCursor > 0) composeCursor--;
+                updateComposeText();
+                return true;
+            case CODE_RIGHT:
+                if (composeCursor < composeBuffer.length()) composeCursor++;
+                updateComposeText();
+                return true;
+            case CODE_UP:
+                composeCursor = 0;
+                updateComposeText();
+                return true;
+            case CODE_DOWN:
+                composeCursor = composeBuffer.length();
+                updateComposeText();
+                return true;
+            case CODE_ESC:
+                closeCompose(true);
+                return true;
+            default:
+                insertComposeText(printable(code));
+                return true;
+        }
+    }
+
+    private void insertComposeText(String text) {
+        if (TextUtils.isEmpty(text)) return;
+        composeBuffer.insert(composeCursor, text);
+        composeCursor += text.length();
+        clearOneShotModifiers();
+        updateComposeText();
+    }
+
+    private void deleteComposeBeforeCursor() {
+        if (composeCursor <= 0 || composeBuffer.length() == 0) return;
+        composeBuffer.deleteCharAt(composeCursor - 1);
+        composeCursor--;
+        updateComposeText();
+    }
+
+    private void updateComposeText() {
+        if (composeText == null) return;
+        composeCursor = clamp(composeCursor, 0, composeBuffer.length());
+
+        String visibleText = composeBuffer.length() == 0
+                ? "Draft text — tap Insert to send"
+                : composeBuffer.toString();
+        int visibleCursor = composeBuffer.length() == 0 ? 0 : composeCursor;
+
+        SpannableStringBuilder display = new SpannableStringBuilder(visibleText);
+        display.insert(visibleCursor, "\u200B");
+        display.setSpan(new CursorSpan(), visibleCursor, visibleCursor + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        composeText.setText(display);
+    }
+
+    private void moveComposeCursorToTouch(MotionEvent event) {
+        if (composeText == null || composeBuffer.length() == 0) return;
+        Layout layout = composeText.getLayout();
+        if (layout == null) return;
+
+        int x = (int) event.getX() - composeText.getTotalPaddingLeft() + composeText.getScrollX();
+        int y = (int) event.getY() - composeText.getTotalPaddingTop() + composeText.getScrollY();
+        int line = clamp(layout.getLineForVertical(y), 0, layout.getLineCount() - 1);
+        int offset = layout.getOffsetForHorizontal(line, x);
+        if (offset > composeCursor) {
+            offset--;
+        }
+        composeCursor = clamp(offset, 0, composeBuffer.length());
+        updateComposeText();
+    }
+
+    private int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
     private void handleShiftTap() {
         long now = System.currentTimeMillis();
         if (capsLock) {
@@ -537,6 +745,10 @@ public class TBoardInputMethodService extends InputMethodService {
     }
 
     private void commitSecondary(String secondary) {
+        if (composeMode) {
+            insertComposeText(secondary);
+            return;
+        }
         InputConnection ic = getCurrentInputConnection();
         if (ic != null) {
             commitText(ic, secondary);
@@ -544,6 +756,10 @@ public class TBoardInputMethodService extends InputMethodService {
     }
 
     private void commitText(InputConnection ic, String text) {
+        if (composeMode) {
+            insertComposeText(text);
+            return;
+        }
         if (text.length() == 1) {
             int keyCode = keyCodeForChar(text.charAt(0));
             int meta = 0;
@@ -771,6 +987,10 @@ public class TBoardInputMethodService extends InputMethodService {
 
     private void commitRecognizedSpeech(String text) {
         if (TextUtils.isEmpty(text)) return;
+        if (composeMode) {
+            insertComposeText(text);
+            return;
+        }
         InputConnection ic = getCurrentInputConnection();
         if (ic != null) {
             ic.commitText(text, 1);
@@ -820,6 +1040,22 @@ public class TBoardInputMethodService extends InputMethodService {
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private class CursorSpan extends ReplacementSpan {
+        @Override
+        public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
+            return 0;
+        }
+
+        @Override
+        public void draw(Canvas canvas, CharSequence text, int start, int end, float x,
+                         int top, int y, int bottom, Paint paint) {
+            int originalColor = paint.getColor();
+            paint.setColor(Color.BLACK);
+            canvas.drawRect(x, top + dp(4), x + dp(2), bottom - dp(4), paint);
+            paint.setColor(originalColor);
+        }
     }
 
     private enum Style {
