@@ -58,6 +58,8 @@ public class TBoardInputMethodService extends InputMethodService {
     private static final String CODE_COMPOSE = "COMPOSE";
     private static final String CODE_SNIPPETS = "SNIPPETS";
     private static final String CODE_TMUX_PREFIX = "TMUX_PREFIX";
+    private static final String CODE_SETTINGS = "SETTINGS";
+    private static final String CODE_MENU = "MENU";
     private static final String CODE_SYMBOLS = "SYMBOLS";
     private static final String CODE_ALPHA = "ALPHA";
 
@@ -80,6 +82,7 @@ public class TBoardInputMethodService extends InputMethodService {
     private boolean symbolMode;
     private boolean composeMode;
     private boolean snippetsMode;
+    private boolean menuMode;
     private boolean historyMode;
     private boolean voiceActive;
     private boolean voiceListening;
@@ -154,9 +157,6 @@ public class TBoardInputMethodService extends InputMethodService {
         voiceKey = null;
         composeText = null;
 
-        if (snippetsMode) {
-            addSnippetsPanel();
-        }
         if (historyMode) {
             addHistoryPanel();
         }
@@ -164,7 +164,11 @@ public class TBoardInputMethodService extends InputMethodService {
             addComposePanel();
         }
         addDevRow();
-        if (symbolMode) {
+        if (menuMode) {
+            addMenuPanel();
+        } else if (snippetsMode) {
+            addSnippetsPanel();
+        } else if (symbolMode) {
             addSymbolRows();
         } else {
             addAlphaRows();
@@ -179,13 +183,59 @@ public class TBoardInputMethodService extends InputMethodService {
                 key("Ctrl", CODE_CTRL, 0.95f, Style.DEV),
                 key("Alt", CODE_ALT, 0.85f, Style.DEV),
                 key("Mic", CODE_VOICE, 0.95f, Style.DEV),
-                key(composeMode ? "Draft•" : "Draft", CODE_COMPOSE, 1.1f, Style.DEV),
-                key(snippetsMode ? "Snip•" : "Snip", CODE_SNIPPETS, 0.95f, Style.DEV),
-                key("Tmux", CODE_TMUX_PREFIX, 1.0f, Style.DEV),
-                key("↑", CODE_UP, 0.65f, Style.DEV),
-                key("←", CODE_LEFT, 0.65f, Style.DEV),
-                key("↓", CODE_DOWN, 0.65f, Style.DEV),
-                key("→", CODE_RIGHT, 0.65f, Style.DEV));
+                key(menuMode ? "…•" : "…", CODE_MENU, 0.85f, Style.DEV),
+                key("↑", CODE_UP, 0.7f, Style.DEV),
+                key("←", CODE_LEFT, 0.7f, Style.DEV),
+                key("↓", CODE_DOWN, 0.7f, Style.DEV),
+                key("→", CODE_RIGHT, 0.7f, Style.DEV));
+    }
+
+    private void addMenuPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(4), dp(4), dp(4), dp(4));
+        panel.setBackgroundColor(Color.rgb(199, 200, 202));
+
+        addMenuRow(panel,
+                new MenuAction("Draft", () -> {
+                    menuMode = false;
+                    snippetsMode = false;
+                    composeMode = true;
+                    buildKeyboard();
+                }),
+                new MenuAction("Snippets", () -> {
+                    menuMode = false;
+                    snippetsMode = true;
+                    buildKeyboard();
+                }),
+                new MenuAction("Tmux Prefix", () -> {
+                    menuMode = false;
+                    snippetsMode = false;
+                    sendTmuxPrefix();
+                    buildKeyboard();
+                }),
+                new MenuAction("Settings", () -> {
+                    menuMode = false;
+                    snippetsMode = false;
+                    openSettings();
+                    buildKeyboard();
+                }));
+
+        root.addView(panel, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+    }
+
+    private void addMenuRow(LinearLayout panel, MenuAction... actions) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        for (MenuAction action : actions) {
+            row.addView(composeButton(action.label, v -> action.run()),
+                    new LinearLayout.LayoutParams(0, dp(48), 1f));
+        }
+        panel.addView(row, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
     }
 
     private void addSnippetsPanel() {
@@ -194,16 +244,11 @@ public class TBoardInputMethodService extends InputMethodService {
         panel.setPadding(dp(4), dp(4), dp(4), dp(4));
         panel.setBackgroundColor(Color.rgb(199, 200, 202));
 
-        addSnippetRow(panel,
-                new Snippet("git st", "git status"),
-                new Snippet("ls -la", "ls -la"),
-                new Snippet("cd", "cd "),
-                new Snippet("clear", "clear"));
-        addSnippetRow(panel,
-                new Snippet("tmux ls", "tmux ls"),
-                new Snippet("attach", "tmux attach -t "),
-                new Snippet("new", "tmux new -s "),
-                new Snippet("exit", "exit"));
+        List<Snippet> snippets = loadSnippets();
+        for (int i = 0; i < snippets.size(); i += 4) {
+            int end = Math.min(i + 4, snippets.size());
+            addSnippetRow(panel, snippets.subList(i, end).toArray(new Snippet[0]));
+        }
 
         root.addView(panel, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -647,6 +692,12 @@ public class TBoardInputMethodService extends InputMethodService {
             case CODE_TMUX_PREFIX:
                 sendTmuxPrefix();
                 return;
+            case CODE_SETTINGS:
+                openSettings();
+                return;
+            case CODE_MENU:
+                toggleMenu();
+                return;
             case CODE_SYMBOLS:
                 symbolMode = true;
                 buildKeyboard();
@@ -705,20 +756,63 @@ public class TBoardInputMethodService extends InputMethodService {
         }
     }
 
+    private void openSettings() {
+        Intent intent = new Intent(this, SetupActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(intent);
+    }
+
+    private void toggleMenu() {
+        menuMode = !menuMode;
+        if (menuMode) {
+            snippetsMode = false;
+        }
+        buildKeyboard();
+    }
+
     private void toggleSnippets() {
         snippetsMode = !snippetsMode;
+        if (snippetsMode) {
+            menuMode = false;
+        }
         buildKeyboard();
     }
 
     private void insertSnippet(String text) {
         if (composeMode) {
             insertComposeText(text);
-            return;
+        } else {
+            InputConnection ic = getCurrentInputConnection();
+            if (ic != null) {
+                ic.commitText(text, 1);
+            }
         }
-        InputConnection ic = getCurrentInputConnection();
-        if (ic != null) {
-            ic.commitText(text, 1);
+        snippetsMode = false;
+        menuMode = false;
+        buildKeyboard();
+    }
+
+    private List<Snippet> loadSnippets() {
+        ArrayList<Snippet> snippets = new ArrayList<>();
+        snippets.add(new Snippet("git st", "git status"));
+        snippets.add(new Snippet("ls -la", "ls -la"));
+        snippets.add(new Snippet("cd", "cd "));
+        snippets.add(new Snippet("clear", "clear"));
+        snippets.add(new Snippet("tmux ls", "tmux ls"));
+        snippets.add(new Snippet("attach", "tmux attach -t "));
+        snippets.add(new Snippet("new", "tmux new -s "));
+        snippets.add(new Snippet("exit", "exit"));
+
+        SharedPreferences prefs = getSharedPreferences(SetupActivity.PREFS_NAME, MODE_PRIVATE);
+        int count = prefs.getInt(SetupActivity.PREF_CUSTOM_SNIPPET_COUNT, 0);
+        for (int i = 0; i < count; i++) {
+            String label = prefs.getString(SetupActivity.PREF_CUSTOM_SNIPPET_LABEL_PREFIX + i, null);
+            String text = prefs.getString(SetupActivity.PREF_CUSTOM_SNIPPET_TEXT_PREFIX + i, null);
+            if (!TextUtils.isEmpty(label) && text != null) {
+                snippets.add(new Snippet(label, text));
+            }
         }
+        return snippets;
     }
 
     private void openCompose() {
@@ -1358,6 +1452,20 @@ public class TBoardInputMethodService extends InputMethodService {
         SPACE,
         NAV,
         INVISIBLE
+    }
+
+    private static class MenuAction {
+        final String label;
+        final Runnable action;
+
+        MenuAction(String label, Runnable action) {
+            this.label = label;
+            this.action = action;
+        }
+
+        void run() {
+            action.run();
+        }
     }
 
     private static class Snippet {
