@@ -58,6 +58,9 @@ public class TBoardInputMethodService extends InputMethodService {
     private static final String CODE_SYMBOLS = "SYMBOLS";
     private static final String CODE_ALPHA = "ALPHA";
 
+    private static final String PREF_DRAFT_HISTORY_PREFIX = "draft_history_";
+    private static final int MAX_DRAFT_HISTORY = 8;
+
     private static final long SHIFT_DOUBLE_TAP_MS = 450L;
     private static final long SECONDARY_HOLD_MS = 250L;
     private static final long DELETE_REPEAT_MS = 55L;
@@ -74,6 +77,7 @@ public class TBoardInputMethodService extends InputMethodService {
     private boolean symbolMode;
     private boolean composeMode;
     private boolean snippetsMode;
+    private boolean historyMode;
     private boolean voiceActive;
     private boolean voiceListening;
     private long lastShiftTapTime;
@@ -149,6 +153,9 @@ public class TBoardInputMethodService extends InputMethodService {
         if (snippetsMode) {
             addSnippetsPanel();
         }
+        if (historyMode) {
+            addHistoryPanel();
+        }
         if (composeMode) {
             addComposePanel();
         }
@@ -211,6 +218,32 @@ public class TBoardInputMethodService extends InputMethodService {
                 LinearLayout.LayoutParams.WRAP_CONTENT));
     }
 
+    private void addHistoryPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(4), dp(4), dp(4), dp(4));
+        panel.setBackgroundColor(Color.rgb(199, 200, 202));
+
+        List<String> history = loadDraftHistory();
+        if (history.isEmpty()) {
+            TextView empty = composeButton("No draft history yet", v -> toggleHistory());
+            panel.addView(empty, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(38)));
+        } else {
+            for (String item : history) {
+                panel.addView(composeButton(historyLabel(item), v -> loadHistoryDraft(item)),
+                        new LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                dp(38)));
+            }
+        }
+
+        root.addView(panel, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+    }
+
     private void addComposePanel() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
@@ -240,6 +273,7 @@ public class TBoardInputMethodService extends InputMethodService {
         actions.setPadding(0, dp(4), 0, 0);
         actions.addView(composeButton("Cancel", v -> closeCompose(false)), new LinearLayout.LayoutParams(0, dp(42), 1f));
         actions.addView(composeButton("Clear", v -> clearComposeDraft()), new LinearLayout.LayoutParams(0, dp(42), 1f));
+        actions.addView(composeButton(historyMode ? "Hist•" : "Hist", v -> toggleHistory()), new LinearLayout.LayoutParams(0, dp(42), 1f));
         actions.addView(composeButton("Insert", v -> submitComposeDraft()), new LinearLayout.LayoutParams(0, dp(42), 1.25f));
         panel.addView(actions, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -681,6 +715,7 @@ public class TBoardInputMethodService extends InputMethodService {
 
     private void closeCompose(boolean keepDraft) {
         composeMode = false;
+        historyMode = false;
         if (!keepDraft) {
             composeBuffer.setLength(0);
             composeCursor = 0;
@@ -690,12 +725,67 @@ public class TBoardInputMethodService extends InputMethodService {
 
     private void submitComposeDraft() {
         if (composeBuffer.length() > 0) {
+            String draft = composeBuffer.toString();
             InputConnection ic = getCurrentInputConnection();
             if (ic != null) {
-                ic.commitText(composeBuffer.toString(), 1);
+                ic.commitText(draft, 1);
             }
+            saveDraftToHistory(draft);
         }
         closeCompose(false);
+    }
+
+    private void toggleHistory() {
+        historyMode = !historyMode;
+        if (historyMode) {
+            composeMode = true;
+        }
+        buildKeyboard();
+    }
+
+    private void loadHistoryDraft(String draft) {
+        composeMode = true;
+        historyMode = false;
+        composeBuffer.setLength(0);
+        composeBuffer.append(draft);
+        composeCursor = composeBuffer.length();
+        buildKeyboard();
+    }
+
+    private void saveDraftToHistory(String draft) {
+        if (TextUtils.isEmpty(draft)) return;
+        List<String> history = loadDraftHistory();
+        history.remove(draft);
+        history.add(0, draft);
+        SharedPreferences.Editor editor = getSharedPreferences(SetupActivity.PREFS_NAME, MODE_PRIVATE).edit();
+        for (int i = 0; i < MAX_DRAFT_HISTORY; i++) {
+            if (i < history.size()) {
+                editor.putString(PREF_DRAFT_HISTORY_PREFIX + i, history.get(i));
+            } else {
+                editor.remove(PREF_DRAFT_HISTORY_PREFIX + i);
+            }
+        }
+        editor.apply();
+    }
+
+    private List<String> loadDraftHistory() {
+        SharedPreferences prefs = getSharedPreferences(SetupActivity.PREFS_NAME, MODE_PRIVATE);
+        ArrayList<String> history = new ArrayList<>();
+        for (int i = 0; i < MAX_DRAFT_HISTORY; i++) {
+            String draft = prefs.getString(PREF_DRAFT_HISTORY_PREFIX + i, null);
+            if (!TextUtils.isEmpty(draft)) {
+                history.add(draft);
+            }
+        }
+        return history;
+    }
+
+    private String historyLabel(String draft) {
+        String label = draft.replace('\n', ' ').replace('\t', ' ');
+        if (label.length() > 48) {
+            return label.substring(0, 45) + "…";
+        }
+        return label;
     }
 
     private void clearComposeDraft() {
