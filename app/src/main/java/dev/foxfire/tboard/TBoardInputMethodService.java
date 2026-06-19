@@ -10,8 +10,8 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
-import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.Space;
@@ -34,10 +34,9 @@ public class TBoardInputMethodService extends InputMethodService {
     private static final String CODE_RIGHT = "RIGHT";
     private static final String CODE_SYMBOLS = "SYMBOLS";
     private static final String CODE_ALPHA = "ALPHA";
-    private static final String CODE_HIDE = "HIDE";
-    private static final String CODE_NEXT = "NEXT";
 
     private static final long SHIFT_DOUBLE_TAP_MS = 450L;
+    private static final long SECONDARY_HOLD_MS = 250L;
     private static final long DELETE_REPEAT_MS = 55L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -58,16 +57,35 @@ public class TBoardInputMethodService extends InputMethodService {
     public View onCreateInputView() {
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(4), dp(5), dp(4), dp(4));
         root.setBackgroundResource(R.drawable.keyboard_background);
+        updateRootPadding();
         buildKeyboard();
         return root;
+    }
+
+    @Override
+    public void onStartInputView(EditorInfo info, boolean restarting) {
+        super.onStartInputView(info, restarting);
+        updateRootPadding();
     }
 
     @Override
     public void onFinishInputView(boolean finishingInput) {
         cancelDeleteRepeat();
         super.onFinishInputView(finishingInput);
+    }
+
+    private void updateRootPadding() {
+        if (root == null) return;
+        root.setPadding(dp(4), dp(5), dp(4), dp(shouldReserveSystemImeControlSpace() ? 34 : 5));
+    }
+
+    private boolean shouldReserveSystemImeControlSpace() {
+        try {
+            return shouldOfferSwitchingToNextInputMethod();
+        } catch (RuntimeException ignored) {
+            return false;
+        }
     }
 
     private void buildKeyboard() {
@@ -82,7 +100,6 @@ public class TBoardInputMethodService extends InputMethodService {
         } else {
             addAlphaRows();
         }
-        addBottomNavRow();
         updateModifierLabels();
     }
 
@@ -144,13 +161,6 @@ public class TBoardInputMethodService extends InputMethodService {
                 key("↵", CODE_ENTER, 1.55f, Style.ACTION));
     }
 
-    private void addBottomNavRow() {
-        addRow(34,
-                key("⌄", CODE_HIDE, 1f, Style.NAV),
-                key("", CODE_SPACE, 5f, Style.INVISIBLE),
-                key("◎", CODE_NEXT, 1f, Style.NAV));
-    }
-
     private void addRow(int heightDp, KeySpec... keys) {
         addRowWithInsets(heightDp, 0f, 0f, keys);
     }
@@ -189,13 +199,43 @@ public class TBoardInputMethodService extends InputMethodService {
         if (TextUtils.equals(spec.code, CODE_BACKSPACE)) {
             cell.setOnTouchListener((v, event) -> handleBackspaceTouch(v, event));
         } else if (spec.style != Style.INVISIBLE) {
-            cell.setOnClickListener(v -> handleKey(spec.code));
             if (spec.secondary != null) {
-                cell.setLongClickable(true);
-                cell.setOnLongClickListener(v -> {
+                final boolean[] secondaryTriggered = {false};
+                final Runnable secondaryRunnable = () -> {
+                    secondaryTriggered[0] = true;
                     commitSecondary(spec.secondary);
-                    return true;
+                };
+                cell.setOnTouchListener((v, event) -> {
+                    switch (event.getActionMasked()) {
+                        case MotionEvent.ACTION_DOWN:
+                            secondaryTriggered[0] = false;
+                            v.setPressed(true);
+                            handler.postDelayed(secondaryRunnable, SECONDARY_HOLD_MS);
+                            return true;
+                        case MotionEvent.ACTION_MOVE:
+                            if (event.getX() < 0 || event.getX() > v.getWidth()
+                                    || event.getY() < 0 || event.getY() > v.getHeight()) {
+                                handler.removeCallbacks(secondaryRunnable);
+                                v.setPressed(false);
+                            }
+                            return true;
+                        case MotionEvent.ACTION_UP:
+                            handler.removeCallbacks(secondaryRunnable);
+                            v.setPressed(false);
+                            if (!secondaryTriggered[0]) {
+                                handleKey(spec.code);
+                            }
+                            return true;
+                        case MotionEvent.ACTION_CANCEL:
+                            handler.removeCallbacks(secondaryRunnable);
+                            v.setPressed(false);
+                            return true;
+                        default:
+                            return true;
+                    }
                 });
+            } else {
+                cell.setOnClickListener(v -> handleKey(spec.code));
             }
         }
 
@@ -229,12 +269,15 @@ public class TBoardInputMethodService extends InputMethodService {
         if (spec.secondary != null) {
             TextView secondary = new TextView(this);
             secondary.setText(spec.secondary);
-            secondary.setTextSize(10f);
+            secondary.setTextSize(9f);
             secondary.setGravity(Gravity.CENTER);
             secondary.setIncludeFontPadding(false);
             secondary.setTextColor(Color.rgb(87, 88, 90));
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(18), dp(18), Gravity.TOP | Gravity.RIGHT);
-            lp.setMargins(0, dp(3), dp(4), 0);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM | Gravity.RIGHT);
+            lp.setMargins(0, 0, dp(4), dp(4));
             visual.addView(secondary, lp);
         }
 
@@ -392,12 +435,6 @@ public class TBoardInputMethodService extends InputMethodService {
                 symbolMode = false;
                 buildKeyboard();
                 return;
-            case CODE_HIDE:
-                requestHideSelf(0);
-                return;
-            case CODE_NEXT:
-                switchToNextInputMethod();
-                return;
             default:
                 break;
         }
@@ -527,14 +564,6 @@ public class TBoardInputMethodService extends InputMethodService {
         }
         if (ctrlKey != null) ctrlKey.setText(ctrlLatch ? "Ctrl•" : "Ctrl");
         if (altKey != null) altKey.setText(altLatch ? "Alt•" : "Alt");
-    }
-
-    private void switchToNextInputMethod() {
-        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-        if (imm != null && getWindow() != null && getWindow().getWindow() != null) {
-            // Deprecated on newer Android, but still works across the minSdk range for a simple starter IME.
-            imm.switchToNextInputMethod(getWindow().getWindow().getAttributes().token, false);
-        }
     }
 
     private int dp(int value) {
