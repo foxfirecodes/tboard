@@ -1,6 +1,8 @@
 package dev.foxfire.tboard;
 
 import android.Manifest;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -17,6 +19,7 @@ import android.text.Layout;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextUtils;
+import android.text.style.BackgroundColorSpan;
 import android.text.style.ReplacementSpan;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -85,6 +88,7 @@ public class TBoardInputMethodService extends InputMethodService {
     private long lastAltTapTime;
     private final StringBuilder composeBuffer = new StringBuilder();
     private int composeCursor;
+    private boolean composeAllSelected;
     private LinearLayout root;
     private TextView composeText;
     private TextView shiftKey;
@@ -276,6 +280,19 @@ public class TBoardInputMethodService extends InputMethodService {
         actions.addView(composeButton(historyMode ? "Hist•" : "Hist", v -> toggleHistory()), new LinearLayout.LayoutParams(0, dp(42), 1f));
         actions.addView(composeButton("Insert", v -> submitComposeDraft()), new LinearLayout.LayoutParams(0, dp(42), 1.25f));
         panel.addView(actions, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout editActions = new LinearLayout(this);
+        editActions.setOrientation(LinearLayout.HORIZONTAL);
+        editActions.setPadding(0, dp(4), 0, 0);
+        editActions.addView(composeButton("All", v -> selectAllCompose()), new LinearLayout.LayoutParams(0, dp(38), 0.8f));
+        editActions.addView(composeButton("Copy", v -> copyComposeDraft()), new LinearLayout.LayoutParams(0, dp(38), 1f));
+        editActions.addView(composeButton("Paste", v -> pasteIntoCompose()), new LinearLayout.LayoutParams(0, dp(38), 1f));
+        editActions.addView(composeButton("←W", v -> moveComposeWordLeft()), new LinearLayout.LayoutParams(0, dp(38), 0.8f));
+        editActions.addView(composeButton("W→", v -> moveComposeWordRight()), new LinearLayout.LayoutParams(0, dp(38), 0.8f));
+        editActions.addView(composeButton("DelW", v -> deleteComposeWordBeforeCursor()), new LinearLayout.LayoutParams(0, dp(38), 1f));
+        panel.addView(editActions, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
 
@@ -791,6 +808,67 @@ public class TBoardInputMethodService extends InputMethodService {
     private void clearComposeDraft() {
         composeBuffer.setLength(0);
         composeCursor = 0;
+        composeAllSelected = false;
+        updateComposeText();
+    }
+
+    private void selectAllCompose() {
+        if (composeBuffer.length() == 0) return;
+        composeAllSelected = true;
+        composeCursor = composeBuffer.length();
+        updateComposeText();
+    }
+
+    private void copyComposeDraft() {
+        if (composeBuffer.length() == 0) return;
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard != null) {
+            clipboard.setPrimaryClip(ClipData.newPlainText("TBoard draft", composeBuffer.toString()));
+            Toast.makeText(this, "Draft copied", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void pasteIntoCompose() {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null || !clipboard.hasPrimaryClip() || clipboard.getPrimaryClip() == null
+                || clipboard.getPrimaryClip().getItemCount() == 0) {
+            return;
+        }
+        CharSequence pasted = clipboard.getPrimaryClip().getItemAt(0).coerceToText(this);
+        if (!TextUtils.isEmpty(pasted)) {
+            insertComposeText(pasted.toString());
+        }
+    }
+
+    private void moveComposeWordLeft() {
+        composeAllSelected = false;
+        int cursor = Math.max(0, composeCursor);
+        while (cursor > 0 && Character.isWhitespace(composeBuffer.charAt(cursor - 1))) cursor--;
+        while (cursor > 0 && !Character.isWhitespace(composeBuffer.charAt(cursor - 1))) cursor--;
+        composeCursor = cursor;
+        updateComposeText();
+    }
+
+    private void moveComposeWordRight() {
+        composeAllSelected = false;
+        int cursor = Math.min(composeCursor, composeBuffer.length());
+        while (cursor < composeBuffer.length() && !Character.isWhitespace(composeBuffer.charAt(cursor))) cursor++;
+        while (cursor < composeBuffer.length() && Character.isWhitespace(composeBuffer.charAt(cursor))) cursor++;
+        composeCursor = cursor;
+        updateComposeText();
+    }
+
+    private void deleteComposeWordBeforeCursor() {
+        if (composeAllSelected) {
+            clearComposeDraft();
+            return;
+        }
+        if (composeCursor <= 0 || composeBuffer.length() == 0) return;
+        int start = composeCursor;
+        while (start > 0 && Character.isWhitespace(composeBuffer.charAt(start - 1))) start--;
+        while (start > 0 && !Character.isWhitespace(composeBuffer.charAt(start - 1))) start--;
+        composeBuffer.delete(start, composeCursor);
+        composeCursor = start;
         updateComposeText();
     }
 
@@ -809,18 +887,22 @@ public class TBoardInputMethodService extends InputMethodService {
                 insertComposeText(" ");
                 return true;
             case CODE_LEFT:
+                composeAllSelected = false;
                 if (composeCursor > 0) composeCursor--;
                 updateComposeText();
                 return true;
             case CODE_RIGHT:
+                composeAllSelected = false;
                 if (composeCursor < composeBuffer.length()) composeCursor++;
                 updateComposeText();
                 return true;
             case CODE_UP:
+                composeAllSelected = false;
                 composeCursor = 0;
                 updateComposeText();
                 return true;
             case CODE_DOWN:
+                composeAllSelected = false;
                 composeCursor = composeBuffer.length();
                 updateComposeText();
                 return true;
@@ -835,6 +917,11 @@ public class TBoardInputMethodService extends InputMethodService {
 
     private void insertComposeText(String text) {
         if (TextUtils.isEmpty(text)) return;
+        if (composeAllSelected) {
+            composeBuffer.setLength(0);
+            composeCursor = 0;
+            composeAllSelected = false;
+        }
         composeBuffer.insert(composeCursor, text);
         composeCursor += text.length();
         clearOneShotModifiers();
@@ -842,6 +929,10 @@ public class TBoardInputMethodService extends InputMethodService {
     }
 
     private void deleteComposeBeforeCursor() {
+        if (composeAllSelected) {
+            clearComposeDraft();
+            return;
+        }
         if (composeCursor <= 0 || composeBuffer.length() == 0) return;
         composeBuffer.deleteCharAt(composeCursor - 1);
         composeCursor--;
@@ -858,12 +949,17 @@ public class TBoardInputMethodService extends InputMethodService {
         int visibleCursor = composeBuffer.length() == 0 ? 0 : composeCursor;
 
         SpannableStringBuilder display = new SpannableStringBuilder(visibleText);
+        if (composeAllSelected && composeBuffer.length() > 0) {
+            display.setSpan(new BackgroundColorSpan(Color.rgb(185, 205, 255)), 0, display.length(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
         display.insert(visibleCursor, "\u200B");
         display.setSpan(new CursorSpan(), visibleCursor, visibleCursor + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         composeText.setText(display);
     }
 
     private void moveComposeCursorToTouch(MotionEvent event) {
+        composeAllSelected = false;
         if (composeText == null || composeBuffer.length() == 0) return;
         Layout layout = composeText.getLayout();
         if (layout == null) return;
