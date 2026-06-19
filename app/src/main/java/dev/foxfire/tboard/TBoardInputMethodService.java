@@ -54,6 +54,7 @@ public class TBoardInputMethodService extends InputMethodService {
     private static final String CODE_VOICE = "VOICE";
     private static final String CODE_COMPOSE = "COMPOSE";
     private static final String CODE_SNIPPETS = "SNIPPETS";
+    private static final String CODE_TMUX_PREFIX = "TMUX_PREFIX";
     private static final String CODE_SYMBOLS = "SYMBOLS";
     private static final String CODE_ALPHA = "ALPHA";
 
@@ -167,12 +168,13 @@ public class TBoardInputMethodService extends InputMethodService {
                 key("Ctrl", CODE_CTRL, 0.95f, Style.DEV),
                 key("Alt", CODE_ALT, 0.85f, Style.DEV),
                 key("Mic", CODE_VOICE, 0.95f, Style.DEV),
-                key(composeMode ? "Draft•" : "Draft", CODE_COMPOSE, 1.15f, Style.DEV),
-                key(snippetsMode ? "Snip•" : "Snip", CODE_SNIPPETS, 1.0f, Style.DEV),
-                key("↑", CODE_UP, 0.7f, Style.DEV),
-                key("←", CODE_LEFT, 0.7f, Style.DEV),
-                key("↓", CODE_DOWN, 0.7f, Style.DEV),
-                key("→", CODE_RIGHT, 0.7f, Style.DEV));
+                key(composeMode ? "Draft•" : "Draft", CODE_COMPOSE, 1.1f, Style.DEV),
+                key(snippetsMode ? "Snip•" : "Snip", CODE_SNIPPETS, 0.95f, Style.DEV),
+                key("Tmux", CODE_TMUX_PREFIX, 1.0f, Style.DEV),
+                key("↑", CODE_UP, 0.65f, Style.DEV),
+                key("←", CODE_LEFT, 0.65f, Style.DEV),
+                key("↓", CODE_DOWN, 0.65f, Style.DEV),
+                key("→", CODE_RIGHT, 0.65f, Style.DEV));
     }
 
     private void addSnippetsPanel() {
@@ -591,6 +593,9 @@ public class TBoardInputMethodService extends InputMethodService {
             case CODE_SNIPPETS:
                 toggleSnippets();
                 return;
+            case CODE_TMUX_PREFIX:
+                sendTmuxPrefix();
+                return;
             case CODE_SYMBOLS:
                 symbolMode = true;
                 buildKeyboard();
@@ -639,6 +644,13 @@ public class TBoardInputMethodService extends InputMethodService {
                 return;
             default:
                 commitText(ic, printable(code));
+        }
+    }
+
+    private void sendTmuxPrefix() {
+        InputConnection ic = getCurrentInputConnection();
+        if (ic != null) {
+            sendModifiedKey(ic, KeyEvent.KEYCODE_B, KeyEvent.META_CTRL_ON);
         }
     }
 
