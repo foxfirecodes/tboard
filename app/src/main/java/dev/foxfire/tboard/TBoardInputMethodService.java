@@ -1,7 +1,14 @@
 package dev.foxfire.tboard;
 
+import android.Manifest;
+import android.content.ComponentName;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.Color;
 import android.inputmethodservice.InputMethodService;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
@@ -12,11 +19,17 @@ import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
+import android.speech.RecognitionListener;
+import android.speech.RecognizerIntent;
+import android.speech.SpeechRecognizer;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.Space;
 import android.widget.TextView;
+import android.widget.Toast;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 public class TBoardInputMethodService extends InputMethodService {
@@ -32,6 +45,7 @@ public class TBoardInputMethodService extends InputMethodService {
     private static final String CODE_DOWN = "DOWN";
     private static final String CODE_LEFT = "LEFT";
     private static final String CODE_RIGHT = "RIGHT";
+    private static final String CODE_VOICE = "VOICE";
     private static final String CODE_SYMBOLS = "SYMBOLS";
     private static final String CODE_ALPHA = "ALPHA";
 
@@ -47,11 +61,17 @@ public class TBoardInputMethodService extends InputMethodService {
     private boolean ctrlLatch;
     private boolean altLatch;
     private boolean symbolMode;
+    private boolean voiceActive;
+    private boolean voiceListening;
     private long lastShiftTapTime;
     private LinearLayout root;
     private TextView shiftKey;
     private TextView ctrlKey;
     private TextView altKey;
+    private TextView voiceKey;
+    private SpeechRecognizer speechRecognizer;
+    private String speechRecognizerProvider;
+    private Runnable voiceStartupTimeoutRunnable;
 
     @Override
     public View onCreateInputView() {
@@ -72,7 +92,19 @@ public class TBoardInputMethodService extends InputMethodService {
     @Override
     public void onFinishInputView(boolean finishingInput) {
         cancelDeleteRepeat();
+        stopVoiceInput();
         super.onFinishInputView(finishingInput);
+    }
+
+    @Override
+    public void onDestroy() {
+        stopVoiceInput();
+        if (speechRecognizer != null) {
+            speechRecognizer.destroy();
+            speechRecognizer = null;
+            speechRecognizerProvider = null;
+        }
+        super.onDestroy();
     }
 
     private void updateRootPadding() {
@@ -93,6 +125,7 @@ public class TBoardInputMethodService extends InputMethodService {
         shiftKey = null;
         ctrlKey = null;
         altKey = null;
+        voiceKey = null;
 
         addDevRow();
         if (symbolMode) {
@@ -105,14 +138,15 @@ public class TBoardInputMethodService extends InputMethodService {
 
     private void addDevRow() {
         addRow(45,
-                key("Esc", CODE_ESC, 1.15f, Style.DEV),
-                key("Tab", CODE_TAB, 1.15f, Style.DEV),
-                key("Ctrl", CODE_CTRL, 1.2f, Style.DEV),
-                key("Alt", CODE_ALT, 1.1f, Style.DEV),
-                key("↑", CODE_UP, 1f, Style.DEV),
-                key("←", CODE_LEFT, 1f, Style.DEV),
-                key("↓", CODE_DOWN, 1f, Style.DEV),
-                key("→", CODE_RIGHT, 1f, Style.DEV));
+                key("Esc", CODE_ESC, 1.1f, Style.DEV),
+                key("Tab", CODE_TAB, 1.1f, Style.DEV),
+                key("Ctrl", CODE_CTRL, 1.15f, Style.DEV),
+                key("Alt", CODE_ALT, 1.05f, Style.DEV),
+                key("Mic", CODE_VOICE, 1.15f, Style.DEV),
+                key("↑", CODE_UP, 0.9f, Style.DEV),
+                key("←", CODE_LEFT, 0.9f, Style.DEV),
+                key("↓", CODE_DOWN, 0.9f, Style.DEV),
+                key("→", CODE_RIGHT, 0.9f, Style.DEV));
     }
 
     private void addAlphaRows() {
@@ -284,6 +318,7 @@ public class TBoardInputMethodService extends InputMethodService {
         if (TextUtils.equals(spec.code, CODE_SHIFT)) shiftKey = primary;
         if (TextUtils.equals(spec.code, CODE_CTRL)) ctrlKey = primary;
         if (TextUtils.equals(spec.code, CODE_ALT)) altKey = primary;
+        if (TextUtils.equals(spec.code, CODE_VOICE)) voiceKey = primary;
         return visual;
     }
 
@@ -427,6 +462,9 @@ public class TBoardInputMethodService extends InputMethodService {
                 altLatch = !altLatch;
                 updateModifierLabels();
                 return;
+            case CODE_VOICE:
+                toggleVoiceInput();
+                return;
             case CODE_SYMBOLS:
                 symbolMode = true;
                 buildKeyboard();
@@ -564,6 +602,220 @@ public class TBoardInputMethodService extends InputMethodService {
         }
         if (ctrlKey != null) ctrlKey.setText(ctrlLatch ? "Ctrl•" : "Ctrl");
         if (altKey != null) altKey.setText(altLatch ? "Alt•" : "Alt");
+        if (voiceKey != null) {
+            if (voiceListening) {
+                voiceKey.setText("Mic•");
+            } else if (voiceActive) {
+                voiceKey.setText("Mic…");
+            } else {
+                voiceKey.setText("Mic");
+            }
+        }
+    }
+
+    private void toggleVoiceInput() {
+        if (voiceListening) {
+            finishVoiceInput();
+        } else if (voiceActive) {
+            Toast.makeText(this, "Voice input is starting…", Toast.LENGTH_SHORT).show();
+        } else {
+            startVoiceInput();
+        }
+    }
+
+    private void startVoiceInput() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "Grant microphone permission for TBoard voice input", Toast.LENGTH_SHORT).show();
+            Intent intent = new Intent(this, SetupActivity.class);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            intent.putExtra("requestMicPermission", true);
+            startActivity(intent);
+            return;
+        }
+
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            Toast.makeText(this, "No speech recognizer available", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        if (!ensureSpeechRecognizer()) {
+            return;
+        }
+
+        voiceActive = true;
+        voiceListening = false;
+        updateModifierLabels();
+        scheduleVoiceStartupTimeout();
+
+        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        intent.putExtra(RecognizerIntent.EXTRA_ENABLE_FORMATTING, RecognizerIntent.FORMATTING_OPTIMIZE_QUALITY);
+        intent.putExtra(RecognizerIntent.EXTRA_HIDE_PARTIAL_TRAILING_PUNCTUATION, true);
+        intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+        intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 2);
+        intent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
+        speechRecognizer.startListening(intent);
+    }
+
+    private boolean ensureSpeechRecognizer() {
+        String selectedProvider = selectedSpeechProvider();
+        if (speechRecognizer != null && TextUtils.equals(selectedProvider, speechRecognizerProvider)) {
+            return true;
+        }
+
+        if (speechRecognizer != null) {
+            speechRecognizer.destroy();
+            speechRecognizer = null;
+            speechRecognizerProvider = null;
+        }
+
+        try {
+            ComponentName component = null;
+            boolean useOnDevice = SetupActivity.SPEECH_PROVIDER_ON_DEVICE.equals(selectedProvider);
+            if (!TextUtils.isEmpty(selectedProvider) && !useOnDevice) {
+                component = ComponentName.unflattenFromString(selectedProvider);
+                if (component == null || !isSpeechProviderAvailable(component)) {
+                    Toast.makeText(this, "Selected voice provider unavailable; using system default", Toast.LENGTH_SHORT).show();
+                    selectedProvider = SetupActivity.SPEECH_PROVIDER_SYSTEM_DEFAULT;
+                    component = null;
+                }
+            }
+
+            if (useOnDevice) {
+                speechRecognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(this);
+            } else {
+                speechRecognizer = component == null
+                        ? SpeechRecognizer.createSpeechRecognizer(this)
+                        : SpeechRecognizer.createSpeechRecognizer(this, component);
+            }
+            speechRecognizer.setRecognitionListener(new TBoardRecognitionListener());
+            speechRecognizerProvider = selectedProvider;
+            return true;
+        } catch (RuntimeException e) {
+            Toast.makeText(this, "Could not start selected voice provider", Toast.LENGTH_SHORT).show();
+            speechRecognizer = null;
+            speechRecognizerProvider = null;
+            return false;
+        }
+    }
+
+    private String selectedSpeechProvider() {
+        SharedPreferences prefs = getSharedPreferences(SetupActivity.PREFS_NAME, MODE_PRIVATE);
+        return prefs.getString(SetupActivity.PREF_SPEECH_PROVIDER,
+                SetupActivity.SPEECH_PROVIDER_SYSTEM_DEFAULT);
+    }
+
+    private boolean isSpeechProviderAvailable(ComponentName component) {
+        Intent intent = new Intent(SetupActivity.RECOGNITION_SERVICE_INTERFACE);
+        intent.setComponent(component);
+        List<ResolveInfo> services = getPackageManager().queryIntentServices(intent, PackageManager.MATCH_ALL);
+        return !services.isEmpty();
+    }
+
+    private void finishVoiceInput() {
+        if (speechRecognizer != null && voiceActive) {
+            speechRecognizer.stopListening();
+        }
+        voiceListening = false;
+        updateModifierLabels();
+    }
+
+    private void stopVoiceInput() {
+        cancelVoiceStartupTimeout();
+        if (speechRecognizer != null && voiceActive) {
+            speechRecognizer.cancel();
+        }
+        voiceActive = false;
+        voiceListening = false;
+        updateModifierLabels();
+    }
+
+    private void scheduleVoiceStartupTimeout() {
+        cancelVoiceStartupTimeout();
+        voiceStartupTimeoutRunnable = () -> {
+            if (voiceActive && !voiceListening) {
+                stopVoiceInput();
+                Toast.makeText(this, "Voice input did not become ready", Toast.LENGTH_SHORT).show();
+            }
+        };
+        handler.postDelayed(voiceStartupTimeoutRunnable, 5000L);
+    }
+
+    private void cancelVoiceStartupTimeout() {
+        if (voiceStartupTimeoutRunnable != null) {
+            handler.removeCallbacks(voiceStartupTimeoutRunnable);
+            voiceStartupTimeoutRunnable = null;
+        }
+    }
+
+    private String bestSpeechResult(ArrayList<String> matches) {
+        String first = matches.get(0);
+        for (String match : matches) {
+            if (looksFormatted(match)) {
+                return match;
+            }
+        }
+        return first;
+    }
+
+    private boolean looksFormatted(String text) {
+        if (TextUtils.isEmpty(text)) return false;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '.' || c == ',' || c == '?' || c == '!' || c == ':' || c == ';') {
+                return true;
+            }
+        }
+        return Character.isUpperCase(text.charAt(0));
+    }
+
+    private void commitRecognizedSpeech(String text) {
+        if (TextUtils.isEmpty(text)) return;
+        InputConnection ic = getCurrentInputConnection();
+        if (ic != null) {
+            ic.commitText(text, 1);
+        }
+    }
+
+    private class TBoardRecognitionListener implements RecognitionListener {
+        @Override public void onReadyForSpeech(Bundle params) {
+            cancelVoiceStartupTimeout();
+            voiceActive = true;
+            voiceListening = true;
+            updateModifierLabels();
+        }
+        @Override public void onBeginningOfSpeech() {
+            voiceActive = true;
+            voiceListening = true;
+            updateModifierLabels();
+        }
+        @Override public void onRmsChanged(float rmsdB) {}
+        @Override public void onBufferReceived(byte[] buffer) {}
+        @Override public void onEndOfSpeech() {
+            voiceListening = false;
+            updateModifierLabels();
+        }
+        @Override public void onError(int error) {
+            cancelVoiceStartupTimeout();
+            voiceActive = false;
+            voiceListening = false;
+            updateModifierLabels();
+            if (error != SpeechRecognizer.ERROR_CLIENT && error != SpeechRecognizer.ERROR_NO_MATCH) {
+                Toast.makeText(TBoardInputMethodService.this, "Voice input failed", Toast.LENGTH_SHORT).show();
+            }
+        }
+        @Override public void onResults(Bundle results) {
+            cancelVoiceStartupTimeout();
+            voiceActive = false;
+            voiceListening = false;
+            updateModifierLabels();
+            ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+            if (matches != null && !matches.isEmpty()) {
+                commitRecognizedSpeech(bestSpeechResult(matches));
+            }
+        }
+        @Override public void onPartialResults(Bundle partialResults) {}
+        @Override public void onEvent(int eventType, Bundle params) {}
     }
 
     private int dp(int value) {
