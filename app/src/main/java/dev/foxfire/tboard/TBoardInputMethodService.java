@@ -2,10 +2,14 @@ package dev.foxfire.tboard;
 
 import android.graphics.Color;
 import android.inputmethodservice.InputMethodService;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
@@ -33,10 +37,18 @@ public class TBoardInputMethodService extends InputMethodService {
     private static final String CODE_HIDE = "HIDE";
     private static final String CODE_NEXT = "NEXT";
 
+    private static final long SHIFT_DOUBLE_TAP_MS = 450L;
+    private static final long DELETE_REPEAT_MS = 55L;
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private Runnable deleteRepeatRunnable;
+
     private boolean shift;
+    private boolean capsLock;
     private boolean ctrlLatch;
     private boolean altLatch;
     private boolean symbolMode;
+    private long lastShiftTapTime;
     private LinearLayout root;
     private TextView shiftKey;
     private TextView ctrlKey;
@@ -50,6 +62,12 @@ public class TBoardInputMethodService extends InputMethodService {
         root.setBackgroundResource(R.drawable.keyboard_background);
         buildKeyboard();
         return root;
+    }
+
+    @Override
+    public void onFinishInputView(boolean finishingInput) {
+        cancelDeleteRepeat();
+        super.onFinishInputView(finishingInput);
     }
 
     private void buildKeyboard() {
@@ -82,17 +100,17 @@ public class TBoardInputMethodService extends InputMethodService {
 
     private void addAlphaRows() {
         addRow(57,
-                key("q¹", "q"), key("w²", "w"), key("e³", "e"), key("r⁴", "r"), key("t⁵", "t"),
-                key("y⁶", "y"), key("u⁷", "u"), key("i⁸", "i"), key("o⁹", "o"), key("p⁰", "p"));
+                key("q", "q", "1"), key("w", "w", "2"), key("e", "e", "3"), key("r", "r", "4"), key("t", "t", "5"),
+                key("y", "y", "6"), key("u", "u", "7"), key("i", "i", "8"), key("o", "o", "9"), key("p", "p", "0"));
 
         addRowWithInsets(57, 0.48f, 0.48f,
-                key("a", "a"), key("s", "s"), key("d", "d"), key("f", "f"), key("g", "g"),
-                key("h", "h"), key("j", "j"), key("k", "k"), key("l", "l"));
+                key("a", "a", "@"), key("s", "s", "#"), key("d", "d", "$"), key("f", "f", "_"), key("g", "g", "&"),
+                key("h", "h", "-"), key("j", "j", "+"), key("k", "k", "("), key("l", "l", ")"));
 
         addRow(57,
                 key("⇧", CODE_SHIFT, 1.45f, Style.ACTION),
-                key("z", "z"), key("x", "x"), key("c", "c"), key("v", "v"),
-                key("b", "b"), key("n", "n"), key("m", "m"),
+                key("z", "z", "*"), key("x", "x", "\""), key("c", "c", "'"), key("v", "v", ":"),
+                key("b", "b", ";"), key("n", "n", "!"), key("m", "m", "?"),
                 key("⌫", CODE_BACKSPACE, 1.45f, Style.ACTION));
 
         addRow(59,
@@ -167,9 +185,21 @@ public class TBoardInputMethodService extends InputMethodService {
     private View makeKeyCell(KeySpec spec) {
         FrameLayout cell = new FrameLayout(this);
         cell.setClickable(spec.style != Style.INVISIBLE);
-        cell.setOnClickListener(v -> handleKey(spec.code));
 
-        TextView visual = makeKeyVisual(spec);
+        if (TextUtils.equals(spec.code, CODE_BACKSPACE)) {
+            cell.setOnTouchListener((v, event) -> handleBackspaceTouch(v, event));
+        } else if (spec.style != Style.INVISIBLE) {
+            cell.setOnClickListener(v -> handleKey(spec.code));
+            if (spec.secondary != null) {
+                cell.setLongClickable(true);
+                cell.setOnLongClickListener(v -> {
+                    commitSecondary(spec.secondary);
+                    return true;
+                });
+            }
+        }
+
+        View visual = makeKeyVisual(spec);
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT);
@@ -180,20 +210,84 @@ public class TBoardInputMethodService extends InputMethodService {
         return cell;
     }
 
-    private TextView makeKeyVisual(KeySpec spec) {
-        TextView key = new TextView(this);
-        key.setText(spec.display);
-        key.setTextSize(textSizeFor(spec));
-        key.setGravity(Gravity.CENTER);
-        key.setIncludeFontPadding(false);
-        key.setTextColor(textColorFor(spec.style));
-        key.setBackgroundResource(backgroundFor(spec.style));
-        key.setDuplicateParentStateEnabled(true);
+    private View makeKeyVisual(KeySpec spec) {
+        FrameLayout visual = new FrameLayout(this);
+        visual.setBackgroundResource(backgroundFor(spec.style));
+        visual.setDuplicateParentStateEnabled(true);
 
-        if (TextUtils.equals(spec.code, CODE_SHIFT)) shiftKey = key;
-        if (TextUtils.equals(spec.code, CODE_CTRL)) ctrlKey = key;
-        if (TextUtils.equals(spec.code, CODE_ALT)) altKey = key;
-        return key;
+        TextView primary = new TextView(this);
+        primary.setText(spec.display);
+        primary.setTextSize(textSizeFor(spec));
+        primary.setGravity(Gravity.CENTER);
+        primary.setIncludeFontPadding(false);
+        primary.setTextColor(textColorFor(spec.style));
+        primary.setDuplicateParentStateEnabled(true);
+        visual.addView(primary, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+
+        if (spec.secondary != null) {
+            TextView secondary = new TextView(this);
+            secondary.setText(spec.secondary);
+            secondary.setTextSize(10f);
+            secondary.setGravity(Gravity.CENTER);
+            secondary.setIncludeFontPadding(false);
+            secondary.setTextColor(Color.rgb(87, 88, 90));
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(18), dp(18), Gravity.TOP | Gravity.RIGHT);
+            lp.setMargins(0, dp(3), dp(4), 0);
+            visual.addView(secondary, lp);
+        }
+
+        if (TextUtils.equals(spec.code, CODE_SHIFT)) shiftKey = primary;
+        if (TextUtils.equals(spec.code, CODE_CTRL)) ctrlKey = primary;
+        if (TextUtils.equals(spec.code, CODE_ALT)) altKey = primary;
+        return visual;
+    }
+
+    private boolean handleBackspaceTouch(View view, MotionEvent event) {
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                view.setPressed(true);
+                sendBackspaceOnce();
+                startDeleteRepeat();
+                return true;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                view.setPressed(false);
+                cancelDeleteRepeat();
+                return true;
+            default:
+                return true;
+        }
+    }
+
+    private void sendBackspaceOnce() {
+        InputConnection ic = getCurrentInputConnection();
+        if (ic != null) {
+            sendKey(ic, KeyEvent.KEYCODE_DEL);
+        }
+    }
+
+    private void startDeleteRepeat() {
+        cancelDeleteRepeat();
+        deleteRepeatRunnable = new Runnable() {
+            @Override
+            public void run() {
+                InputConnection ic = getCurrentInputConnection();
+                if (ic != null) {
+                    sendModifiedKey(ic, KeyEvent.KEYCODE_DEL, 0);
+                    handler.postDelayed(this, DELETE_REPEAT_MS);
+                }
+            }
+        };
+        handler.postDelayed(deleteRepeatRunnable, ViewConfiguration.getLongPressTimeout());
+    }
+
+    private void cancelDeleteRepeat() {
+        if (deleteRepeatRunnable != null) {
+            handler.removeCallbacks(deleteRepeatRunnable);
+            deleteRepeatRunnable = null;
+        }
     }
 
     private int horizontalInsetFor(Style style) {
@@ -260,11 +354,19 @@ public class TBoardInputMethodService extends InputMethodService {
     }
 
     private KeySpec key(String display, String code) {
-        return key(display, code, 1f, Style.NORMAL);
+        return key(display, code, 1f, Style.NORMAL, null);
+    }
+
+    private KeySpec key(String display, String code, String secondary) {
+        return key(display, code, 1f, Style.NORMAL, secondary);
     }
 
     private KeySpec key(String display, String code, float weight, Style style) {
-        return new KeySpec(display, code, weight, style);
+        return key(display, code, weight, style, null);
+    }
+
+    private KeySpec key(String display, String code, float weight, Style style, String secondary) {
+        return new KeySpec(display, code, weight, style, secondary);
     }
 
     private void handleKey(String code) {
@@ -272,8 +374,7 @@ public class TBoardInputMethodService extends InputMethodService {
 
         switch (code) {
             case CODE_SHIFT:
-                shift = !shift;
-                updateModifierLabels();
+                handleShiftTap();
                 return;
             case CODE_CTRL:
                 ctrlLatch = !ctrlLatch;
@@ -336,11 +437,35 @@ public class TBoardInputMethodService extends InputMethodService {
         }
     }
 
+    private void handleShiftTap() {
+        long now = System.currentTimeMillis();
+        if (capsLock) {
+            capsLock = false;
+            shift = false;
+            lastShiftTapTime = 0L;
+        } else if (lastShiftTapTime != 0L && now - lastShiftTapTime <= SHIFT_DOUBLE_TAP_MS) {
+            capsLock = true;
+            shift = true;
+            lastShiftTapTime = 0L;
+        } else {
+            shift = !shift;
+            lastShiftTapTime = now;
+        }
+        updateModifierLabels();
+    }
+
     private String printable(String code) {
         if (code.length() == 1 && Character.isLetter(code.charAt(0))) {
-            return shift ? code.toUpperCase(Locale.US) : code;
+            return (shift || capsLock) ? code.toUpperCase(Locale.US) : code;
         }
         return code;
+    }
+
+    private void commitSecondary(String secondary) {
+        InputConnection ic = getCurrentInputConnection();
+        if (ic != null) {
+            commitText(ic, secondary);
+        }
     }
 
     private void commitText(InputConnection ic, String text) {
@@ -364,7 +489,7 @@ public class TBoardInputMethodService extends InputMethodService {
         int meta = 0;
         if (ctrlLatch) meta |= KeyEvent.META_CTRL_ON;
         if (altLatch) meta |= KeyEvent.META_ALT_ON;
-        if (shift) meta |= KeyEvent.META_SHIFT_ON;
+        if (shift || capsLock) meta |= KeyEvent.META_SHIFT_ON;
         sendModifiedKey(ic, keyCode, meta);
         clearOneShotModifiers();
     }
@@ -386,12 +511,20 @@ public class TBoardInputMethodService extends InputMethodService {
     private void clearOneShotModifiers() {
         ctrlLatch = false;
         altLatch = false;
-        shift = false;
+        if (!capsLock) {
+            shift = false;
+        }
         updateModifierLabels();
     }
 
     private void updateModifierLabels() {
-        if (shiftKey != null) shiftKey.setText(shift ? "⇧•" : "⇧");
+        if (shiftKey != null) {
+            if (capsLock) {
+                shiftKey.setText("⇪");
+            } else {
+                shiftKey.setText(shift ? "⇧•" : "⇧");
+            }
+        }
         if (ctrlKey != null) ctrlKey.setText(ctrlLatch ? "Ctrl•" : "Ctrl");
         if (altKey != null) altKey.setText(altLatch ? "Alt•" : "Alt");
     }
@@ -422,12 +555,14 @@ public class TBoardInputMethodService extends InputMethodService {
         final String code;
         final float weight;
         final Style style;
+        final String secondary;
 
-        KeySpec(String display, String code, float weight, Style style) {
+        KeySpec(String display, String code, float weight, Style style, String secondary) {
             this.display = display;
             this.code = code;
             this.weight = weight;
             this.style = style;
+            this.secondary = secondary;
         }
     }
 }
