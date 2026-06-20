@@ -7,10 +7,14 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.graphics.Rect;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.speech.SpeechRecognizer;
 import android.view.Gravity;
+import android.view.View;
+import android.view.WindowInsets;
+import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
@@ -36,19 +40,37 @@ public class SetupActivity extends Activity {
 
     private static final int REQUEST_RECORD_AUDIO = 1001;
 
+    private ScrollView settingsScroll;
+    private LinearLayout settingsRoot;
     private RadioGroup speechProviderGroup;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
 
-        ScrollView scroll = new ScrollView(this);
+        settingsScroll = new ScrollView(this);
+        settingsScroll.setFillViewport(false);
+        settingsScroll.setClipToPadding(false);
         LinearLayout root = new LinearLayout(this);
+        settingsRoot = root;
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER_HORIZONTAL);
         int pad = dp(24);
         root.setPadding(pad, pad, pad, pad);
-        scroll.addView(root);
+        settingsScroll.addView(root);
+        settingsScroll.setOnApplyWindowInsetsListener((v, insets) -> {
+            int imeBottom = 0;
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                imeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
+            }
+            int bottomPadding = imeBottom > 0 ? imeBottom + dp(24) : dp(24);
+            settingsScroll.setPadding(0, 0, 0, bottomPadding);
+            if (imeBottom > 0 && getCurrentFocus() instanceof EditText) {
+                scrollFieldIntoView(getCurrentFocus());
+            }
+            return insets;
+        });
 
         TextView title = new TextView(this);
         title.setText("TBoard");
@@ -98,7 +120,7 @@ public class SetupActivity extends Activity {
         addSpeechProviderSettings(root);
         addSnippetSettings(root);
 
-        setContentView(scroll);
+        setContentView(settingsScroll);
 
         if (getIntent().getBooleanExtra("requestMicPermission", false) && !hasMicPermission()) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_RECORD_AUDIO);
@@ -200,6 +222,10 @@ public class SetupActivity extends Activity {
 
         EditText labelInput = new EditText(this);
         labelInput.setHint("Button label, e.g. ssh prod");
+        labelInput.setOnFocusChangeListener((v, hasFocus) -> {
+            if (hasFocus) scrollFieldIntoView(v);
+        });
+        labelInput.setOnClickListener(this::scrollFieldIntoView);
         root.addView(labelInput, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
@@ -208,6 +234,10 @@ public class SetupActivity extends Activity {
         textInput.setHint("Snippet text, e.g. ssh user@host");
         textInput.setSingleLine(false);
         textInput.setMinLines(2);
+        textInput.setOnFocusChangeListener((v, hasFocus) -> {
+            if (hasFocus) scrollFieldIntoView(v);
+        });
+        textInput.setOnClickListener(this::scrollFieldIntoView);
         root.addView(textInput, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
@@ -345,6 +375,16 @@ public class SetupActivity extends Activity {
 
     private boolean hasMicPermission() {
         return checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void scrollFieldIntoView(View field) {
+        if (settingsScroll == null || settingsRoot == null) return;
+        field.postDelayed(() -> {
+            Rect rect = new Rect();
+            field.getDrawingRect(rect);
+            settingsRoot.offsetDescendantRectToMyCoords(field, rect);
+            settingsScroll.smoothScrollTo(0, Math.max(0, rect.top - dp(72)));
+        }, 350);
     }
 
     private int dp(int value) {
